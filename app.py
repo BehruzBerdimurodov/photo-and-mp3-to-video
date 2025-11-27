@@ -86,8 +86,10 @@ TEXTS = {
         'send_audio': "Iltimos avval rasm yuboring!",
         'processing': "⏳ Jarayon: {}%",
         'complete': "✅ Jarayon: 100% - Tayyor!",
-        'video_ready': "✅ Tayyor! Video muvaffaqiyatli yaratildi",
-        'audio_ready': "✅ Tayyor! MP3 muvaffaqiyatli yaratildi",
+        # O'ZGARTIRILDI: "yaratildi" -> "hosil qilindi"
+        'video_ready': "✅ Tayyor! Video muvaffaqiyatli hosil qilindi",
+        # O'ZGARTIRILDI: "yaratildi" -> "tayyorlandi"
+        'audio_ready': "✅ Tayyor! MP3 muvaffaqiyatli tayyorlandi",
         'send_again': "\n\nYana ishlash uchun pastdagi tugmalardan foydalaning 🔄",
         'error': "❌ Xatolik yuz berdi: {}\n\nIltimos qaytadan urinib ko'ring.",
         'start_first': "Iltimos /start buyrug'ini bosing!",
@@ -114,8 +116,10 @@ TEXTS = {
         'send_audio': "Пожалуйста, сначала отправьте фото!",
         'processing': "⏳ Процесс: {}%",
         'complete': "✅ Процесс: 100% - Готово!",
-        'video_ready': "✅ Готово! Видео успешно создано",
-        'audio_ready': "✅ Готово! MP3 успешно создан",
+        # O'ZGARTIRILDI: "создано" -> "сформировано"
+        'video_ready': "✅ Готово! Видео успешно сформировано",
+        # O'ZGARTIRILDI: "создан" -> "подготовлен"
+        'audio_ready': "✅ Готово! MP3 успешно подготовлен",
         'send_again': "\n\nДля продолжения работы используйте кнопки ниже 🔄",
         'error': "❌ Произошла ошибка: {}\n\nПожалуйста, попробуйте снова.",
         'start_first': "Пожалуйста, нажмите /start!",
