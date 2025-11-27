@@ -5,12 +5,23 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from moviepy.editor import ImageClip, AudioFileClip, VideoFileClip
 from pydub import AudioSegment
+# --- MUHIM TUZATISH 1: PIL.Image ni import qilish ---
+from PIL import Image
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# --- MUHIM TUZATISH 2: ANTIALIAS xatosini tuzatish ---
+# Pillow 9.1.0 dan keyin Image.ANTIALIAS olib tashlangan. 
+# MoviePy esa uni talab qiladi.
+if not hasattr(Image, 'ANTIALIAS'):
+    # PIL 9.1.0+ versiyalari uchun yangi konstantani eski nomga bog'laymiz
+    Image.ANTIALIAS = Image.Resampling.LANCZOS
+    logger.info("Image.ANTIALIAS qo'lda Image.Resampling.LANCZOS ga bog'landi.")
+# --------------------------------------------------------
 
 # --- Helper Functions ---
 
