@@ -246,10 +246,12 @@ async def handle_cut_times(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await progress_msg.edit_text(TEXTS[lang]['processing'].format(50))
 
         # Write the video file (This is the long operation)
+        # --- MUHIM O'ZGARTIRISH: BITRATE qo'shildi ---
         subclip.write_videofile(
             output_path, 
             codec='libx264',
             audio_codec='aac', 
+            bitrate='5000k', # Kodlash muammolarini hal qilish uchun qo'shildi
             temp_audiofile='temp-audio.m4a',
             remove_temp=True,
             logger=None
@@ -461,16 +463,25 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         audio_clip = AudioFileClip(audio_path)
         duration = audio_clip.duration
         await progress_msg.edit_text(TEXTS[lang]['processing'].format(70))
-        image_clip = ImageClip(photo_path, duration=duration)
+        
+        # NOTE: rasm o'lchamini videoga moslash uchun ImageClip ni o'rnatish
+        # Agar rasm juda katta bo'lsa, encoding xatolik berishi mumkin. 
+        # Rasm o'lchami standart o'lchamga keltiriladi.
+        image_clip = ImageClip(photo_path, duration=duration).resize(width=1280, height=720) 
+        
         await progress_msg.edit_text(TEXTS[lang]['processing'].format(85))
         video = image_clip.set_audio(audio_clip)
+
+        # --- MUHIM O'ZGARTIRISH: BITRATE qo'shildi ---
         video.write_videofile(
             output_path,
             fps=24,
             codec='libx264',
             audio_codec='aac',
+            bitrate='5000k', # Kodlash muammolarini hal qilish uchun qo'shildi
             logger=None
         )
+        
         await progress_msg.edit_text(TEXTS[lang]['processing'].format(95))
         save_file_paths(user_id, photo_path, audio_path, output_path)
         with open(output_path, 'rb') as video_file:
