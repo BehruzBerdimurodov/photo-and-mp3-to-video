@@ -87,7 +87,7 @@ TEXTS = {
         'processing': "⏳ Jarayon: {}%",
         'complete': "✅ Jarayon: 100% - Tayyor!",
         # O'ZGARTIRILDI: "yaratildi" -> "hosil qilindi"
-        'video_ready': "✅ Tayyor! Video muvaffaqiyatli hosil qilindi",
+        'video_ready': "✅ Tayyor! Video muvaffaqiyatli tayyorlandi!",
         # O'ZGARTIRILDI: "yaratildi" -> "tayyorlandi"
         'audio_ready': "✅ Tayyor! MP3 muvaffaqiyatli tayyorlandi",
         'send_again': "\n\nYana ishlash uchun pastdagi tugmalardan foydalaning 🔄",
