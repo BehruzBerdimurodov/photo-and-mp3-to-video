@@ -2,10 +2,9 @@ import os
 import logging
 import sqlite3
 import asyncio
-import re
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from moviepy.editor import ImageClip, AudioFileClip, VideoFileClip, ColorClip, CompositeVideoClip
+from moviepy.editor import VideoFileClip, AudioFileClip, ImageClip
 from pydub import AudioSegment
 from PIL import Image
 
@@ -16,115 +15,57 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- PATCH: Pillow & MoviePy Compatibility ---
+# --- PATCH: Pillow Compatibility ---
 if not hasattr(Image, 'ANTIALIAS'):
     Image.ANTIALIAS = Image.Resampling.LANCZOS
 
 # --- CONFIG ---
-# Xavfsizlik uchun tokenni shu yerga qo'ying yoki Environment Variable dan oling
-TOKEN = "858160775:AAFAoUppwpZ-JYl_SmFd6jR-65T5mqxZh74" 
+TOKEN = "858160775:AAFAoUppwpZ-JYl_SmFd6jR-65T5mqxZh74" # O'z tokeningizni qo'ying
 
 # --- HELPER FUNCTIONS ---
 
+def clean_temp_files(user_id):
+    """Foydalanuvchiga tegishli vaqtinchalik fayllarni o'chirish"""
+    try:
+        for file in os.listdir():
+            if (file.startswith(f"temp_{user_id}") or file.startswith(f"output_{user_id}")) and file != "bot_data.db":
+                try:
+                    os.remove(file)
+                except PermissionError:
+                    pass # Fayl band bo'lsa tegmymiz
+    except Exception as e:
+        logger.error(f"Cleanup error: {e}")
+
 def parse_time(time_str):
-    """Vaqtni sekundlarga o'giradi (10, 0:30, 1:05)"""
     parts = time_str.split(':')
     try:
-        if len(parts) == 1:
-            return float(parts[0])
-        elif len(parts) == 2:
-            m, s = map(float, parts)
-            return m * 60 + s
-        elif len(parts) == 3:
-            h, m, s = map(float, parts)
-            return h * 3600 + m * 60 + s
-        else:
-            raise ValueError
+        if len(parts) == 1: return float(parts[0])
+        elif len(parts) == 2: return float(parts[0]) * 60 + float(parts[1])
+        elif len(parts) == 3: return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+        else: raise ValueError
     except ValueError:
-        raise ValueError("Vaqt formati noto'g'ri")
+        raise ValueError("Vaqt xato")
 
 def prepare_image(image_path):
-    """
-    Rasmni videoga tayyorlash:
-    1. RGB ga o'tkazish.
-    2. O'lchamlarni juft songa keltirish (H.264 talabi).
-    """
+    """Rasmni videoga tayyorlash (Juft o'lcham)"""
     with Image.open(image_path) as img:
-        img = img.convert("RGB") # CMYK yoki RGBA muammosini hal qiladi
+        img = img.convert("RGB")
         w, h = img.size
-        
-        # O'lchamlar juft bo'lishi shart
         if w % 2 != 0: w -= 1
         if h % 2 != 0: h -= 1
-        
-        # Agar o'lcham o'zgargan bo'lsa, qayta saqlaymiz
         if w != img.size[0] or h != img.size[1]:
             img = img.resize((w, h), Image.Resampling.LANCZOS)
-        
         img.save(image_path, format="JPEG", quality=95)
     return image_path
 
+# --- DB FUNCTIONS ---
 def init_db():
     conn = sqlite3.connect('bot_data.db')
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (user_id INTEGER PRIMARY KEY, language TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, language TEXT)''')
     conn.commit()
     conn.close()
 
-# --- TEXTS ---
-TEXTS = {
-    'uz': {
-        'welcome': "Assalomu alaykum! 👋\n\nIltimos, tilni tanlang:",
-        'choose_lang': "Tilni tanlang / Выберите язык",
-        'lang_selected': "✅ Til tanlandi: O'zbekcha\n\nQuyidagi funksiyalardan birini tanlang:",
-        'main_menu': "Quyidagi funksiyalardan birini tanlang:",
-        'photo_to_video': "🎬 Rasm + Audio → Video",
-        'video_to_mp3': "🎵 Video → MP3",
-        'video_cut': "✂️ Videoni qirqish",
-        'change_language': "🌐 Tilni o'zgartirish",
-        'send_photo': "Iltimos, rasm yuboring 📸",
-        'photo_received': "Rasm qabul qilindi ✅\n\nEndi audio fayl yoki ovozli xabar yuboring 🎵",
-        'send_video': "Iltimos, video yuboring 🎬",
-        'video_received': "Video qabul qilindi ✅\n\nMP3 ga aylantirilmoqda...",
-        'video_received_cut': "Video qabul qilindi ✅\n\nEndi qirqish vaqtlarini 'START-END' formatida yuboring (Masalan: 10-25 yoki 0:30-1:05) ⏱️",
-        'processing': "⏳ Jarayon: {}%",
-        'complete': "✅ Tayyor!",
-        'video_ready': "✅ Tayyor! Video muvaffaqiyatli tayyorlandi!",
-        'audio_ready': "✅ Tayyor! MP3 muvaffaqiyatli tayyorlandi",
-        'send_again': "\n\nYana ishlash uchun menyudan foydalaning 🔄",
-        'error': "❌ Xatolik yuz berdi: {}\n\nQaytadan urinib ko'ring.",
-        'invalid_time': "❌ Vaqt formati noto'g'ri. Masalan: 00:10-00:30",
-        'start_first': "Iltimos /start ni bosing!",
-    },
-    'ru': {
-        'welcome': "Здравствуйте! 👋\n\nПожалуйста, выберите язык:",
-        'choose_lang': "Tilni tanlang / Выберите язык",
-        'lang_selected': "✅ Язык выбран: Русский\n\nВыберите одну из функций ниже:",
-        'main_menu': "Выберите одну из функций ниже:",
-        'photo_to_video': "🎬 Фото + Аудио → Видео",
-        'video_to_mp3': "🎵 Видео → MP3",
-        'video_cut': "✂️ Обрезка видео",
-        'change_language': "🌐 Изменить язык",
-        'send_photo': "Пожалуйста, отправьте фото 📸",
-        'photo_received': "Фото получено ✅\n\nТеперь отправьте аудио файл или голосовое сообщение 🎵",
-        'send_video': "Пожалуйста, отправьте видео 🎬",
-        'video_received': "Видео получено ✅\n\nКонвертация в MP3...",
-        'video_received_cut': "Видео получено ✅\n\nТеперь отправьте время обрезки в формате 'START-END' (Например: 10-25 или 0:30-1:05) ⏱️",
-        'processing': "⏳ Процесс: {}%",
-        'complete': "✅ Готово!",
-        'video_ready': "✅ Готово! Видео успешно сформировано",
-        'audio_ready': "✅ Готово! MP3 успешно подготовлен",
-        'send_again': "\n\nДля продолжения используйте меню 🔄",
-        'error': "❌ Произошла ошибка: {}\n\nПопробуйте снова.",
-        'invalid_time': "❌ Неверный формат времени. Пример: 00:10-00:30",
-        'start_first': "Пожалуйста, нажмите /start!",
-    }
-}
-
-user_data = {}
-
-# --- DB FUNCTIONS ---
 def get_user_language(user_id):
     conn = sqlite3.connect('bot_data.db')
     c = conn.cursor()
@@ -140,91 +81,129 @@ def set_user_language(user_id, language):
     conn.commit()
     conn.close()
 
-def delete_user_files(user_id):
-    """Foydalanuvchining eski temp fayllarini tozalash"""
-    for file in os.listdir():
-        if file.startswith(f"temp_{user_id}") or file.startswith(f"output_{user_id}"):
-            try:
-                os.remove(file)
-            except Exception:
-                pass
+# --- TEXTS ---
+TEXTS = {
+    'uz': {
+        'welcome': "Assalomu alaykum! 👋\n\nIltimos, tilni tanlang:",
+        'choose_lang': "Tilni tanlang / Выберите язык",
+        'main_menu': "Quyidagi funksiyalardan birini tanlang:",
+        'btn_photo_video': "🎬 Rasm + Audio → Video",
+        'btn_video_mp3': "🎵 Video → MP3",
+        'btn_video_cut': "✂️ Videoni qirqish",
+        'btn_mute': "🔇 Videoni ovozsiz qilish",
+        'btn_add_audio': "🔉 Videoga ovoz qo'shish",
+        'btn_lang': "🌐 Tilni o'zgartirish",
+        'send_photo': "Iltimos, rasm yuboring 📸",
+        'send_video': "Iltimos, video yuboring 🎬",
+        'send_audio': "Endi audio yoki ovozli xabar yuboring 🎵",
+        'send_video_for_audio': "Qaysi videoga ovoz qo'shmoqchisiz? Videoni yuboring 🎬",
+        'send_audio_for_video': "Video qabul qilindi. Endi unga qo'yiladigan audioni yuboring 🎵",
+        'video_cut_instr': "Video qabul qilindi. Qirqish vaqtini 'START-END' formatida yozing (Masalan: 10-25) ⏱",
+        'processing': "⏳ Jarayon ketmoqda... {}%",
+        'ready': "✅ Tayyor!",
+        'error': "❌ Xatolik: {}",
+        'invalid_time': "❌ Vaqt formati noto'g'ri!",
+        'start_first': "Iltimos /start ni bosing!",
+    },
+    'ru': {
+        'welcome': "Здравствуйте! 👋\n\nПожалуйста, выберите язык:",
+        'choose_lang': "Tilni tanlang / Выберите язык",
+        'main_menu': "Выберите одну из функций ниже:",
+        'btn_photo_video': "🎬 Фото + Аудио → Видео",
+        'btn_video_mp3': "🎵 Видео → MP3",
+        'btn_video_cut': "✂️ Обрезка видео",
+        'btn_mute': "🔇 Убрать звук из видео",
+        'btn_add_audio': "🔉 Добавить звук в видео",
+        'btn_lang': "🌐 Изменить язык",
+        'send_photo': "Пожалуйста, отправьте фото 📸",
+        'send_video': "Пожалуйста, отправьте видео 🎬",
+        'send_audio': "Теперь отправьте аудио или голосовое сообщение 🎵",
+        'send_video_for_audio': "Отправьте видео, к которому нужно добавить звук 🎬",
+        'send_audio_for_video': "Видео получено. Теперь отправьте аудио файл 🎵",
+        'video_cut_instr': "Видео получено. Напишите время обрезки в формате 'START-END' (Например: 10-25) ⏱",
+        'processing': "⏳ Обработка... {}%",
+        'ready': "✅ Готово!",
+        'error': "❌ Ошибка: {}",
+        'invalid_time': "❌ Неверный формат времени!",
+        'start_first': "Пожалуйста, нажмите /start!",
+    }
+}
 
+user_data = {}
+
+# --- KEYBOARDS ---
 def get_main_keyboard(lang):
-    keyboard = [
-        [KeyboardButton(TEXTS[lang]['photo_to_video'])],
-        [KeyboardButton(TEXTS[lang]['video_to_mp3']), KeyboardButton(TEXTS[lang]['video_cut'])],
-        [KeyboardButton(TEXTS[lang]['change_language'])]
+    kb = [
+        [KeyboardButton(TEXTS[lang]['btn_photo_video']), KeyboardButton(TEXTS[lang]['btn_video_mp3'])],
+        [KeyboardButton(TEXTS[lang]['btn_mute']), KeyboardButton(TEXTS[lang]['btn_add_audio'])],
+        [KeyboardButton(TEXTS[lang]['btn_video_cut']), KeyboardButton(TEXTS[lang]['btn_lang'])]
     ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    return ReplyKeyboardMarkup(kb, resize_keyboard=True)
 
-# --- PROCESSING FUNCTIONS (IN THREADS) ---
+# --- HEAVY TASKS (MoviePy) ---
 
-def process_video_cut(video_path, start_time, end_time, output_path):
-    """Video qirqish - Blocking function wrapper"""
+def task_photo_to_video(photo_path, audio_path, output_path):
     try:
-        clip = VideoFileClip(video_path)
-        if end_time > clip.duration:
-            end_time = clip.duration
-        
-        subclip = clip.subclip(start_time, end_time)
-        
-        # MUHIM: audio_codec='aac' va pixel_format='yuv420p'
-        subclip.write_videofile(
-            output_path,
-            codec='libx264',
-            audio_codec='aac',
-            pixel_format='yuv420p',  # TELEFONDA OCHISH UCHUN SHART
-            preset='medium',
-            logger=None
-        )
-        subclip.close()
-        clip.close()
-        return True
-    except Exception as e:
-        logger.error(f"Cut Error: {e}")
-        raise e
-
-def process_photo_to_video(photo_path, audio_path, output_path):
-    """Rasm + Audio -> Video - Blocking function wrapper"""
-    try:
-        # Rasmni to'g'irlash
-        clean_photo_path = prepare_image(photo_path)
-        
+        clean_photo = prepare_image(photo_path)
         audio = AudioFileClip(audio_path)
-        image = ImageClip(clean_photo_path, duration=audio.duration)
-        
-        # Agar rasm juda katta bo'lsa, uni kichraytirish (HD)
-        # image = image.resize(height=720) # Ixtiyoriy: sifatni saqlash uchun o'chirildi, lekin o'lcham juft bo'lishi shart
-        
-        video = image.set_audio(audio)
-        
-        # MUHIM SOZLAMALAR
-        video.write_videofile(
-            output_path,
-            fps=24,
-            codec='libx264',
-            audio_codec='aac',
-            pixel_format='yuv420p', # TELEFONDA OCHISH UCHUN SHART
-            preset='medium',
-            threads=4,
-            logger=None
-        )
+        video = ImageClip(clean_photo, duration=audio.duration)
+        video = video.set_audio(audio)
+        video.write_videofile(output_path, fps=24, codec='libx264', audio_codec='aac', preset='fast', logger=None)
         video.close()
         audio.close()
-        return True
     except Exception as e:
-        logger.error(f"Photo2Video Error: {e}")
+        logger.error(e)
         raise e
 
-def process_video_to_mp3(video_path, audio_output):
-    """Video -> MP3 - Blocking function wrapper"""
+def task_video_cut(video_path, start, end, output_path):
+    try:
+        clip = VideoFileClip(video_path)
+        if end > clip.duration: end = clip.duration
+        sub = clip.subclip(start, end)
+        sub.write_videofile(output_path, codec='libx264', audio_codec='aac', preset='fast', logger=None)
+        clip.close()
+        sub.close()
+    except Exception as e:
+        logger.error(e)
+        raise e
+
+def task_video_to_mp3(video_path, audio_output):
+    try:
+        clip = VideoFileClip(video_path)
+        clip.audio.write_audiofile(audio_output, logger=None)
+        clip.close()
+    except Exception as e:
+        logger.error(e)
+        raise e
+
+def task_mute_video(video_path, output_path):
+    try:
+        clip = VideoFileClip(video_path)
+        new_clip = clip.without_audio()
+        new_clip.write_videofile(output_path, codec='libx264', audio_codec='aac', preset='fast', logger=None)
+        clip.close()
+        new_clip.close()
+    except Exception as e:
+        logger.error(e)
+        raise e
+
+def task_add_audio_to_video(video_path, audio_path, output_path):
     try:
         video = VideoFileClip(video_path)
-        video.audio.write_audiofile(audio_output, logger=None)
+        audio = AudioFileClip(audio_path)
+        
+        # Audio videodan uzun bo'lsa kesamiz, kalta bo'lsa shunday qoladi (loop qilmaymiz)
+        if audio.duration > video.duration:
+            audio = audio.subclip(0, video.duration)
+            
+        final_video = video.set_audio(audio)
+        final_video.write_videofile(output_path, codec='libx264', audio_codec='aac', preset='fast', logger=None)
+        
         video.close()
-        return True
+        audio.close()
+        final_video.close()
     except Exception as e:
-        logger.error(f"MP3 Error: {e}")
+        logger.error(e)
         raise e
 
 # --- HANDLERS ---
@@ -232,227 +211,234 @@ def process_video_to_mp3(video_path, audio_output):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     lang = get_user_language(user_id)
-    
     if lang:
-        user_data[user_id] = {'step': 'main_menu', 'lang': lang}
+        user_data[user_id] = {'step': 'menu', 'lang': lang}
         await update.message.reply_text(TEXTS[lang]['main_menu'], reply_markup=get_main_keyboard(lang))
     else:
-        keyboard = [[InlineKeyboardButton("🇺🇿 O'zbekcha", callback_data='lang_uz'),
-                     InlineKeyboardButton("🇷🇺 Русский", callback_data='lang_ru')]]
-        await update.message.reply_text(TEXTS['uz']['choose_lang'], reply_markup=InlineKeyboardMarkup(keyboard))
+        kb = [[InlineKeyboardButton("🇺🇿 O'zbekcha", callback_data='uz'), InlineKeyboardButton("🇷🇺 Русский", callback_data='ru')]]
+        await update.message.reply_text(TEXTS['uz']['choose_lang'], reply_markup=InlineKeyboardMarkup(kb))
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def lang_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
-    lang = query.data.split('_')[1]
-    
-    set_user_language(user_id, lang)
-    user_data[user_id] = {'step': 'main_menu', 'lang': lang}
-    
+    lang = query.data
+    set_user_language(query.from_user.id, lang)
+    user_data[query.from_user.id] = {'step': 'menu', 'lang': lang}
     await query.delete_message()
-    await context.bot.send_message(user_id, TEXTS[lang]['lang_selected'], reply_markup=get_main_keyboard(lang))
+    await context.bot.send_message(query.from_user.id, TEXTS[lang]['main_menu'], reply_markup=get_main_keyboard(lang))
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     lang = get_user_language(user_id) or 'uz'
     text = update.message.text
     
-    # Qirqish vaqtini qabul qilish
-    if user_data.get(user_id, {}).get('step') == 'waiting_cut_times':
-        return await handle_cut_times(update, context)
+    # Reset step
+    user_data[user_id] = {'lang': lang}
 
-    if text == TEXTS[lang]['photo_to_video']:
-        user_data[user_id] = {'step': 'waiting_image', 'lang': lang, 'mode': 'photo_to_video'}
+    if text == TEXTS[lang]['btn_photo_video']:
+        user_data[user_id]['step'] = 'pv_wait_photo'
         await update.message.reply_text(TEXTS[lang]['send_photo'])
-        
-    elif text == TEXTS[lang]['video_to_mp3']:
-        user_data[user_id] = {'step': 'waiting_video', 'lang': lang, 'mode': 'video_to_mp3'}
+    
+    elif text == TEXTS[lang]['btn_video_mp3']:
+        user_data[user_id]['step'] = 'v2m_wait_video'
         await update.message.reply_text(TEXTS[lang]['send_video'])
         
-    elif text == TEXTS[lang]['video_cut']:
-        user_data[user_id] = {'step': 'waiting_cut_video', 'lang': lang, 'mode': 'video_cut'}
+    elif text == TEXTS[lang]['btn_video_cut']:
+        user_data[user_id]['step'] = 'cut_wait_video'
         await update.message.reply_text(TEXTS[lang]['send_video'])
         
-    elif text == TEXTS[lang]['change_language']:
-        keyboard = [[InlineKeyboardButton("🇺🇿 O'zbekcha", callback_data='lang_uz'),
-                     InlineKeyboardButton("🇷🇺 Русский", callback_data='lang_ru')]]
-        await update.message.reply_text(TEXTS[lang]['choose_lang'], reply_markup=InlineKeyboardMarkup(keyboard))
+    elif text == TEXTS[lang]['btn_mute']:
+        user_data[user_id]['step'] = 'mute_wait_video'
+        await update.message.reply_text(TEXTS[lang]['send_video'])
         
+    elif text == TEXTS[lang]['btn_add_audio']:
+        user_data[user_id]['step'] = 'add_wait_video'
+        await update.message.reply_text(TEXTS[lang]['send_video_for_audio'])
+        
+    elif text == TEXTS[lang]['btn_lang']:
+        kb = [[InlineKeyboardButton("🇺🇿 O'zbekcha", callback_data='uz'), InlineKeyboardButton("🇷🇺 Русский", callback_data='ru')]]
+        await update.message.reply_text(TEXTS[lang]['choose_lang'], reply_markup=InlineKeyboardMarkup(kb))
+    
     else:
-        if user_id in user_data:
-             await update.message.reply_text(TEXTS[lang]['main_menu'], reply_markup=get_main_keyboard(lang))
+        if user_data.get(user_id, {}).get('step') == 'cut_wait_time':
+            await handle_cut_text(update, context)
+        else:
+            await update.message.reply_text(TEXTS[lang]['main_menu'], reply_markup=get_main_keyboard(lang))
+
+# --- MEDIA HANDLERS ---
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    lang = get_user_language(user_id) or 'uz'
-    
-    if user_data.get(user_id, {}).get('step') != 'waiting_image':
-        await update.message.reply_text(TEXTS[lang]['start_first'])
-        return
+    state = user_data.get(user_id, {})
+    lang = state.get('lang', 'uz')
 
-    delete_user_files(user_id)
-    photo_file = await update.message.photo[-1].get_file()
-    photo_path = f"temp_{user_id}_photo.jpg"
-    await photo_file.download_to_drive(photo_path)
-    
-    user_data[user_id]['photo_path'] = photo_path
-    user_data[user_id]['step'] = 'waiting_audio'
-    await update.message.reply_text(TEXTS[lang]['photo_received'])
+    if state.get('step') == 'pv_wait_photo':
+        clean_temp_files(user_id)
+        f = await update.message.photo[-1].get_file()
+        path = f"temp_{user_id}_p.jpg"
+        await f.download_to_drive(path)
+        user_data[user_id]['photo_path'] = path
+        user_data[user_id]['step'] = 'pv_wait_audio'
+        await update.message.reply_text(TEXTS[lang]['send_audio'])
 
-async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_audio_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    lang = get_user_language(user_id) or 'uz'
-    
-    if user_data.get(user_id, {}).get('step') != 'waiting_audio':
-        await update.message.reply_text(TEXTS[lang]['start_first'])
+    state = user_data.get(user_id, {})
+    lang = state.get('lang', 'uz')
+    step = state.get('step')
+
+    if step not in ['pv_wait_audio', 'add_wait_audio']:
         return
-        
-    msg = await update.message.reply_text(TEXTS[lang]['processing'].format(0))
-    
+
+    msg = await update.message.reply_text(TEXTS[lang]['processing'].format(10))
     try:
-        # Download Audio
+        # Faylni yuklash
         if update.message.audio:
             f = await update.message.audio.get_file()
             ext = 'mp3'
-        elif update.message.voice:
+        else:
             f = await update.message.voice.get_file()
             ext = 'ogg'
-        else:
-            return
-
-        audio_path = f"temp_{user_id}_audio.{ext}"
+        
+        audio_path = f"temp_{user_id}_a.{ext}"
         await f.download_to_drive(audio_path)
-        
-        # OGG to MP3 (if voice)
-        if ext == 'ogg':
-            await msg.edit_text(TEXTS[lang]['processing'].format(20))
-            converted_path = f"temp_{user_id}_audio.mp3"
-            # Running Pydub in thread to avoid blocking
-            await asyncio.to_thread(lambda: AudioSegment.from_ogg(audio_path).export(converted_path, format="mp3"))
-            os.remove(audio_path)
-            audio_path = converted_path
 
-        await msg.edit_text(TEXTS[lang]['processing'].format(50))
+        # OGG -> MP3 konvertatsiya
+        if ext == 'ogg':
+            mp3_path = f"temp_{user_id}_a.mp3"
+            await asyncio.to_thread(lambda: AudioSegment.from_ogg(audio_path).export(mp3_path, format="mp3"))
+            if os.path.exists(audio_path): os.remove(audio_path)
+            audio_path = mp3_path
         
-        photo_path = user_data[user_id]['photo_path']
         output_path = f"output_{user_id}.mp4"
-        
-        # RUN HEAVY TASK IN THREAD
-        await asyncio.to_thread(process_photo_to_video, photo_path, audio_path, output_path)
-        
-        await msg.edit_text(TEXTS[lang]['processing'].format(100))
-        
-        with open(output_path, 'rb') as v:
-            await update.message.reply_video(v, caption=TEXTS[lang]['video_ready'])
+
+        if step == 'pv_wait_audio':
+            # Rasm + Audio -> Video
+            photo_path = state['photo_path']
+            await msg.edit_text(TEXTS[lang]['processing'].format(50))
+            await asyncio.to_thread(task_photo_to_video, photo_path, audio_path, output_path)
             
-        await msg.delete()
+        elif step == 'add_wait_audio':
+            # Video + Audio -> New Video
+            video_path = state['video_path']
+            await msg.edit_text(TEXTS[lang]['processing'].format(50))
+            await asyncio.to_thread(task_add_audio_to_video, video_path, audio_path, output_path)
+
+        # Yuborish
+        await msg.edit_text(TEXTS[lang]['processing'].format(100))
+        with open(output_path, 'rb') as v:
+            await update.message.reply_video(v, caption=TEXTS[lang]['ready'])
         
+        await msg.delete()
+
     except Exception as e:
-        logger.error(f"Error: {e}")
         await msg.edit_text(TEXTS[lang]['error'].format(str(e)))
     finally:
-        delete_user_files(user_id)
-        user_data[user_id] = {'step': 'main_menu', 'lang': lang}
+        clean_temp_files(user_id)
+        user_data[user_id]['step'] = 'menu'
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    lang = get_user_language(user_id) or 'uz'
-    step = user_data.get(user_id, {}).get('step')
-    
-    if step not in ['waiting_video', 'waiting_cut_video']:
+    state = user_data.get(user_id, {})
+    lang = state.get('lang', 'uz')
+    step = state.get('step')
+
+    if step not in ['v2m_wait_video', 'cut_wait_video', 'mute_wait_video', 'add_wait_video']:
         return
 
-    delete_user_files(user_id)
+    clean_temp_files(user_id)
     msg = await update.message.reply_text(TEXTS[lang]['processing'].format(10))
-    
+
     try:
-        video_file = await update.message.video.get_file()
-        video_path = f"temp_{user_id}_video.mp4"
-        await video_file.download_to_drive(video_path)
-        
-        if step == 'waiting_video': # Video to MP3
+        f = await update.message.video.get_file()
+        video_path = f"temp_{user_id}_v.mp4"
+        await f.download_to_drive(video_path)
+
+        if step == 'v2m_wait_video':
+            # Video -> MP3
             output_path = f"output_{user_id}.mp3"
             await msg.edit_text(TEXTS[lang]['processing'].format(50))
-            
-            # Run in thread
-            await asyncio.to_thread(process_video_to_mp3, video_path, output_path)
-            
+            await asyncio.to_thread(task_video_to_mp3, video_path, output_path)
             with open(output_path, 'rb') as a:
-                await update.message.reply_audio(a, caption=TEXTS[lang]['audio_ready'])
-            
+                await update.message.reply_audio(a, caption=TEXTS[lang]['ready'])
             await msg.delete()
-            delete_user_files(user_id)
-            user_data[user_id] = {'step': 'main_menu', 'lang': lang}
-            
-        elif step == 'waiting_cut_video':
+            clean_temp_files(user_id)
+            user_data[user_id]['step'] = 'menu'
+
+        elif step == 'mute_wait_video':
+            # Mute Video
+            output_path = f"output_{user_id}.mp4"
+            await msg.edit_text(TEXTS[lang]['processing'].format(50))
+            await asyncio.to_thread(task_mute_video, video_path, output_path)
+            with open(output_path, 'rb') as v:
+                await update.message.reply_video(v, caption=TEXTS[lang]['ready'])
+            await msg.delete()
+            clean_temp_files(user_id)
+            user_data[user_id]['step'] = 'menu'
+
+        elif step == 'cut_wait_video':
             user_data[user_id]['video_path'] = video_path
-            user_data[user_id]['step'] = 'waiting_cut_times'
+            user_data[user_id]['step'] = 'cut_wait_time'
             await msg.delete()
-            await update.message.reply_text(TEXTS[lang]['video_received_cut'])
-            
+            await update.message.reply_text(TEXTS[lang]['video_cut_instr'])
+
+        elif step == 'add_wait_video':
+            user_data[user_id]['video_path'] = video_path
+            user_data[user_id]['step'] = 'add_wait_audio'
+            await msg.delete()
+            await update.message.reply_text(TEXTS[lang]['send_audio_for_video'])
+
     except Exception as e:
-        logger.error(f"Video Handle Error: {e}")
         await msg.edit_text(TEXTS[lang]['error'].format(str(e)))
-        delete_user_files(user_id)
+        clean_temp_files(user_id)
 
-async def handle_cut_times(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_cut_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    lang = get_user_language(user_id) or 'uz'
+    state = user_data.get(user_id, {})
+    lang = state.get('lang', 'uz')
     text = update.message.text
-    video_path = user_data.get(user_id, {}).get('video_path')
+    video_path = state.get('video_path')
 
-    if not video_path or not os.path.exists(video_path):
-        await update.message.reply_text("Video topilmadi. Qaytadan boshlang.")
-        user_data[user_id] = {'step': 'main_menu', 'lang': lang}
+    if not video_path:
         return
 
+    msg = await update.message.reply_text(TEXTS[lang]['processing'].format(20))
     try:
-        if '-' not in text: raise ValueError
         start_str, end_str = text.split('-')
         start_t = parse_time(start_str.strip())
         end_t = parse_time(end_str.strip())
         
-        if start_t >= end_t: raise ValueError
+        output_path = f"output_{user_id}.mp4"
         
-        msg = await update.message.reply_text(TEXTS[lang]['processing'].format(30))
-        output_path = f"output_{user_id}_cut.mp4"
-        
-        # RUN HEAVY TASK IN THREAD
-        await asyncio.to_thread(process_video_cut, video_path, start_t, end_t, output_path)
-        
-        await msg.edit_text(TEXTS[lang]['processing'].format(100))
+        await asyncio.to_thread(task_video_cut, video_path, start_t, end_t, output_path)
         
         with open(output_path, 'rb') as v:
-            await update.message.reply_video(v, caption=TEXTS[lang]['video_ready'])
+            await update.message.reply_video(v, caption=TEXTS[lang]['ready'])
             
         await msg.delete()
-        
-    except ValueError:
-        await update.message.reply_text(TEXTS[lang]['invalid_time'])
     except Exception as e:
-        logger.error(f"Cut Process Error: {e}")
-        await update.message.reply_text(TEXTS[lang]['error'].format(str(e)))
+        await msg.edit_text(TEXTS[lang]['error'].format(str(e)))
     finally:
-        if os.path.exists(f"output_{user_id}_cut.mp4"):
-            delete_user_files(user_id)
-        user_data[user_id] = {'step': 'main_menu', 'lang': lang}
+        clean_temp_files(user_id)
+        user_data[user_id]['step'] = 'menu'
 
 def main():
     init_db()
-    application = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(TOKEN).build()
     
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(lang_callback))
     
-    # Handlers
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    application.add_handler(MessageHandler(filters.VIDEO, handle_video))
-    application.add_handler(MessageHandler(filters.AUDIO | filters.VOICE, handle_audio))
+    # Text handler (Menu & Cut time)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu))
+    
+    # Media handlers
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.VIDEO, handle_video))
+    app.add_handler(MessageHandler(filters.AUDIO | filters.VOICE, handle_audio_voice))
     
     logger.info("Bot ishga tushdi...")
-    application.run_polling()
+    app.run_polling()
 
 if __name__ == '__main__':
     main()
