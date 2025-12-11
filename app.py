@@ -2,11 +2,15 @@ import os
 import logging
 import sqlite3
 import asyncio
+import numpy as np
+import cv2
+import easyocr
+from googletrans import Translator
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from moviepy.editor import VideoFileClip, AudioFileClip, ImageClip
 from pydub import AudioSegment
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 # --- LOGGING ---
 logging.basicConfig(
@@ -20,7 +24,13 @@ if not hasattr(Image, 'ANTIALIAS'):
     Image.ANTIALIAS = Image.Resampling.LANCZOS
 
 # --- CONFIG ---
-TOKEN = "858160775:AAFAoUppwpZ-JYl_SmFd6jR-65T5mqxZh74" 
+TOKEN = "858160775:AAFAoUppwpZ-JYl_SmFd6jR-65T5mqxZh74"  # O'zingizni tokenni ishlating
+
+# --- GLOBAL OBJECTS (Optimallashtirish uchun bitta marta yuklanadi) ---
+# EasyOCR ni GPU bor bo'lsa True, yo'q bo'lsa False qiling
+USE_GPU = False 
+reader = easyocr.Reader(['en', 'ru'], gpu=USE_GPU) 
+translator = Translator()
 
 # --- HELPER FUNCTIONS ---
 
@@ -52,8 +62,7 @@ def prepare_image(image_path):
         w, h = img.size
         if w % 2 != 0: w -= 1
         if h % 2 != 0: h -= 1
-        if w != img.size[0] or h != img.size[1]:
-            img = img.resize((w, h), Image.Resampling.LANCZOS)
+        img = img.resize((w, h), Image.Resampling.LANCZOS)
         img.save(image_path, format="JPEG", quality=95)
     return image_path
 
@@ -83,10 +92,11 @@ def set_user_language(user_id, language):
 # --- TEXTS ---
 TEXTS = {
     'uz': {
-        'welcome': "Assalomu alaykum! 👋\n\nMenyudan yoki buyruqlardan foydalaning:\n\n/photo_to_video - Rasm → Video\n/video_to_mp3 - Video → MP3\n/cut_video - Videoni qirqish\n/mute_video - Videoni ovozsiz qilish\n/add_audio - Videoga ovoz qo'shish\n/lang - Tilni o'zgartirish",
+        'welcome': "Assalomu alaykum! 👋\n\nMenyudan yoki buyruqlardan foydalaning:\n\n/photo_to_video - Rasm → Video\n/video_translate - Video tarjima (Beta)\n/video_to_mp3 - Video → MP3\n/cut_video - Videoni qirqish\n/mute_video - Videoni ovozsiz qilish\n/add_audio - Videoga ovoz qo'shish\n/lang - Tilni o'zgartirish",
         'choose_lang': "Tilni tanlang / Выберите язык",
         'main_menu': "Quyidagi funksiyalardan birini tanlang:",
         'btn_photo_video': "🎬 Rasm + Audio → Video",
+        'btn_video_trans': "🔤 Video Tarjima (En/Ru -> Uz)",
         'btn_video_mp3': "🎵 Video → MP3",
         'btn_video_cut': "✂️ Videoni qirqish",
         'btn_mute': "🔇 Videoni ovozsiz qilish",
@@ -99,15 +109,17 @@ TEXTS = {
         'send_audio_for_video': "Video qabul qilindi. Endi unga qo'yiladigan audioni yuboring 🎵",
         'video_cut_instr': "Video qabul qilindi. Qirqish vaqtini 'START-END' formatida yozing (Masalan: 10-25) ⏱",
         'processing': "⏳ Jarayon ketmoqda... {}%",
+        'processing_heavy': "⏳ Video tarjima qilinmoqda. Bu biroz vaqt olishi mumkin (EasyOCR)...",
         'ready': "✅ Tayyor!",
         'error': "❌ Xatolik: {}",
         'invalid_time': "❌ Vaqt formati noto'g'ri!",
     },
     'ru': {
-        'welcome': "Здравствуйте! 👋\n\nИспользуйте меню или команды:\n\n/photo_to_video - Фото → Видео\n/video_to_mp3 - Видео → MP3\n/cut_video - Обрезка видео\n/mute_video - Убрать звук\n/add_audio - Добавить звук\n/lang - Язык",
+        'welcome': "Здравствуйте! 👋\n\nИспользуйте меню или команды:\n\n/photo_to_video - Фото → Видео\n/video_translate - Перевод видео\n/video_to_mp3 - Видео → MP3\n/cut_video - Обрезка видео\n/mute_video - Убрать звук\n/add_audio - Добавить звук\n/lang - Язык",
         'choose_lang': "Tilni tanlang / Выберите язык",
         'main_menu': "Выберите одну из функций ниже:",
         'btn_photo_video': "🎬 Фото + Аудио → Видео",
+        'btn_video_trans': "🔤 Перевод Видео (En/Ru -> Uz)",
         'btn_video_mp3': "🎵 Видео → MP3",
         'btn_video_cut': "✂️ Обрезка видео",
         'btn_mute': "🔇 Убрать звук из видео",
@@ -120,6 +132,7 @@ TEXTS = {
         'send_audio_for_video': "Видео получено. Теперь отправьте аудио файл 🎵",
         'video_cut_instr': "Видео получено. Напишите время обрезки в формате 'START-END' (Например: 10-25) ⏱",
         'processing': "⏳ Обработка... {}%",
+        'processing_heavy': "⏳ Видео переводится. Это может занять время (EasyOCR)...",
         'ready': "✅ Готово!",
         'error': "❌ Ошибка: {}",
         'invalid_time': "❌ Неверный формат времени!",
@@ -131,13 +144,15 @@ user_data = {}
 # --- KEYBOARDS ---
 def get_main_keyboard(lang):
     kb = [
-        [KeyboardButton(TEXTS[lang]['btn_photo_video']), KeyboardButton(TEXTS[lang]['btn_video_mp3'])],
-        [KeyboardButton(TEXTS[lang]['btn_mute']), KeyboardButton(TEXTS[lang]['btn_add_audio'])],
-        [KeyboardButton(TEXTS[lang]['btn_video_cut']), KeyboardButton(TEXTS[lang]['btn_lang'])]
+        [KeyboardButton(TEXTS[lang]['btn_photo_video']), KeyboardButton(TEXTS[lang]['btn_video_trans'])],
+        [KeyboardButton(TEXTS[lang]['btn_video_mp3']), KeyboardButton(TEXTS[lang]['btn_add_audio'])],
+        [KeyboardButton(TEXTS[lang]['btn_mute']), KeyboardButton(TEXTS[lang]['btn_video_cut'])],
+        [KeyboardButton(TEXTS[lang]['btn_lang'])]
     ]
     return ReplyKeyboardMarkup(kb, resize_keyboard=True)
 
-# --- TASKS ---
+# --- TASKS (HEAVY LOGIC) ---
+
 def task_photo_to_video(photo_path, audio_path, output_path):
     try:
         clean_photo = prepare_image(photo_path)
@@ -187,7 +202,75 @@ def task_add_audio_to_video(video_path, audio_path, output_path):
     except Exception as e:
         logger.error(e); raise e
 
-# --- COMMAND HANDLERS (SLASH COMMANDS) ---
+# --- VIDEO TRANSLATION LOGIC (NEW) ---
+
+def process_frame_translation(get_frame, t):
+    """MoviePy uchun kadrni qayta ishlash funksiyasi"""
+    frame = get_frame(t) # Numpy array (Image)
+    
+    # 1. OCR (Matnni topish) - Har bir kadrda qilsa juda sekin bo'ladi.
+    # Optimallashtirish: Kadr o'lchamini kichraytirib qidirish mumkin, lekin sifat yo'qoladi.
+    # Hozircha oddiy usulda har bir kadrni tekshiramiz.
+    
+    try:
+        results = reader.readtext(frame)
+    except Exception:
+        return frame # Xato bo'lsa original kadr qolsin
+
+    # Agar matn bo'lmasa, qaytarish
+    if not results:
+        return frame
+
+    # Numpy arrayni PIL Image ga o'tkazish (chizish osonroq)
+    img_pil = Image.fromarray(frame)
+    draw = ImageDraw.Draw(img_pil)
+    
+    # Fontni yuklash (Linuxda default font, yoki windowsda arial)
+    try:
+        # Font o'lchamini dinamik tanlash kerak aslida
+        font = ImageFont.truetype("arial.ttf", 20)
+    except:
+        font = ImageFont.load_default()
+
+    for (bbox, text, prob) in results:
+        if prob < 0.4: continue # Ishonch past bo'lsa tashlab ketamiz
+
+        # 2. Tarjima qilish
+        try:
+            translated_text = translator.translate(text, dest='uz').text
+        except:
+            translated_text = text # Tarjima o'xshamasa original qolsin
+
+        # 3. Koordinatalarni olish
+        (tl, tr, br, bl) = bbox
+        tl = (int(tl[0]), int(tl[1]))
+        br = (int(br[0]), int(br[1]))
+
+        # 4. Orqa fonni o'chirish (to'rtburchak chizish)
+        # Matn rangiga mos fon tanlash qiyin, shuning uchun qora yoki oq fon qilamiz
+        draw.rectangle([tl, br], fill=(0, 0, 0)) # Qora fon
+
+        # 5. Yangi matnni yozish
+        draw.text(tl, translated_text, font=font, fill=(255, 255, 255)) # Oq yozuv
+
+    return np.array(img_pil)
+
+def task_translate_video(video_path, output_path):
+    """Video tarjima qilish asosiy taski"""
+    try:
+        clip = VideoFileClip(video_path)
+        
+        # Diqqat: fl(make_frame) har bir kadr uchun ishlaydi. Bu juda sekin.
+        # 10 soniyalik video uchun server kuchiga qarab 5-10 daqiqa ketishi mumkin.
+        new_clip = clip.fl(process_frame_translation)
+        
+        new_clip.write_videofile(output_path, codec='libx264', audio_codec='aac', preset='ultrafast', logger=None)
+        clip.close()
+        new_clip.close()
+    except Exception as e:
+        logger.error(e); raise e
+
+# --- COMMAND HANDLERS ---
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -204,6 +287,12 @@ async def cmd_photo_to_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
     lang = get_user_language(user_id) or 'uz'
     user_data[user_id] = {'step': 'pv_wait_photo', 'lang': lang}
     await update.message.reply_text(TEXTS[lang]['send_photo'])
+
+async def cmd_video_translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    lang = get_user_language(user_id) or 'uz'
+    user_data[user_id] = {'step': 'trans_wait_video', 'lang': lang}
+    await update.message.reply_text(TEXTS[lang]['send_video'])
 
 async def cmd_video_to_mp3(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -242,15 +331,14 @@ async def handle_text_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
     lang = get_user_language(user_id) or 'uz'
     text = update.message.text
     
-    # Text commands to logic mapping
     if text == TEXTS[lang]['btn_photo_video']: await cmd_photo_to_video(update, context)
+    elif text == TEXTS[lang]['btn_video_trans']: await cmd_video_translate(update, context)
     elif text == TEXTS[lang]['btn_video_mp3']: await cmd_video_to_mp3(update, context)
     elif text == TEXTS[lang]['btn_video_cut']: await cmd_cut_video(update, context)
     elif text == TEXTS[lang]['btn_mute']: await cmd_mute_video(update, context)
     elif text == TEXTS[lang]['btn_add_audio']: await cmd_add_audio(update, context)
     elif text == TEXTS[lang]['btn_lang']: await cmd_lang(update, context)
     else:
-        # Agar "Video qirqish vaqti" kutilayotgan bo'lsa
         if user_data.get(user_id, {}).get('step') == 'cut_wait_time':
             await handle_cut_text(update, context)
         else:
@@ -266,7 +354,6 @@ async def lang_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(query.from_user.id, TEXTS[lang]['welcome'], reply_markup=get_main_keyboard(lang))
 
 # --- MEDIA HANDLERS ---
-# (Bu qism oldingi kod bilan deyarli bir xil, faqat handler nomlari)
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -320,10 +407,12 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = user_data.get(user_id, {})
     lang = state.get('lang', 'uz')
     step = state.get('step')
-    if step not in ['v2m_wait_video', 'cut_wait_video', 'mute_wait_video', 'add_wait_video']: return
+    
+    valid_steps = ['v2m_wait_video', 'cut_wait_video', 'mute_wait_video', 'add_wait_video', 'trans_wait_video']
+    if step not in valid_steps: return
 
     clean_temp_files(user_id)
-    msg = await update.message.reply_text(TEXTS[lang]['processing'].format(10))
+    msg = await update.message.reply_text(TEXTS[lang]['processing'].format(5))
     try:
         f = await update.message.video.get_file()
         video_path = f"temp_{user_id}_v.mp4"
@@ -335,18 +424,31 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open(out, 'rb') as a: await update.message.reply_audio(a, caption=TEXTS[lang]['ready'])
             await msg.delete()
             clean_temp_files(user_id); user_data[user_id]['step'] = 'menu'
+        
+        elif step == 'trans_wait_video':
+            # Tarjima qilish jarayoni (Og'ir)
+            await msg.edit_text(TEXTS[lang]['processing_heavy'])
+            out = f"output_{user_id}.mp4"
+            await asyncio.to_thread(task_translate_video, video_path, out)
+            with open(out, 'rb') as v: await update.message.reply_video(v, caption=TEXTS[lang]['ready'])
+            await msg.delete()
+            clean_temp_files(user_id); user_data[user_id]['step'] = 'menu'
+
         elif step == 'mute_wait_video':
             out = f"output_{user_id}.mp4"
             await asyncio.to_thread(task_mute_video, video_path, out)
             with open(out, 'rb') as v: await update.message.reply_video(v, caption=TEXTS[lang]['ready'])
             await msg.delete()
             clean_temp_files(user_id); user_data[user_id]['step'] = 'menu'
+        
         elif step == 'cut_wait_video':
             user_data[user_id].update({'video_path': video_path, 'step': 'cut_wait_time'})
             await msg.delete(); await update.message.reply_text(TEXTS[lang]['video_cut_instr'])
+        
         elif step == 'add_wait_video':
             user_data[user_id].update({'video_path': video_path, 'step': 'add_wait_audio'})
             await msg.delete(); await update.message.reply_text(TEXTS[lang]['send_audio_for_video'])
+            
     except Exception as e: await msg.edit_text(TEXTS[lang]['error'].format(str(e))); clean_temp_files(user_id)
 
 async def handle_cut_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -372,6 +474,7 @@ def main():
     # 1. Buyruqlar (Commands)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("photo_to_video", cmd_photo_to_video))
+    app.add_handler(CommandHandler("video_translate", cmd_video_translate))
     app.add_handler(CommandHandler("video_to_mp3", cmd_video_to_mp3))
     app.add_handler(CommandHandler("cut_video", cmd_cut_video))
     app.add_handler(CommandHandler("mute_video", cmd_mute_video))
