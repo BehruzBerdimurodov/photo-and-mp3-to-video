@@ -3,7 +3,7 @@ moviepy==1.0.3
 pydub
 Pillow
 easyocr
-googletrans==4.0.0-rc1
+deep-translator
 opencv-python-headless
 numpy
 torch
