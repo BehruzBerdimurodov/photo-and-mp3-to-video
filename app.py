@@ -3,9 +3,8 @@ import logging
 import sqlite3
 import asyncio
 import numpy as np
-import cv2
 import easyocr
-from googletrans import Translator
+from deep_translator import GoogleTranslator  # O'zgartirildi: googletrans o'rniga
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from moviepy.editor import VideoFileClip, AudioFileClip, ImageClip
@@ -19,18 +18,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- PATCH: Pillow Compatibility ---
+# --- PATCH: Pillow Compatibility (Pillow 10+ versiyalari uchun) ---
 if not hasattr(Image, 'ANTIALIAS'):
     Image.ANTIALIAS = Image.Resampling.LANCZOS
 
 # --- CONFIG ---
 TOKEN = "858160775:AAFAoUppwpZ-JYl_SmFd6jR-65T5mqxZh74"  # O'zingizni tokenni ishlating
 
-# --- GLOBAL OBJECTS (Optimallashtirish uchun bitta marta yuklanadi) ---
-# EasyOCR ni GPU bor bo'lsa True, yo'q bo'lsa False qiling
+# --- GLOBAL OBJECTS ---
+# EasyOCR (Agar serverda GPU bo'lmasa, gpu=False bo'lishi shart)
 USE_GPU = False 
 reader = easyocr.Reader(['en', 'ru'], gpu=USE_GPU) 
-translator = Translator()
 
 # --- HELPER FUNCTIONS ---
 
@@ -202,43 +200,46 @@ def task_add_audio_to_video(video_path, audio_path, output_path):
     except Exception as e:
         logger.error(e); raise e
 
-# --- VIDEO TRANSLATION LOGIC (NEW) ---
+# --- VIDEO TRANSLATION LOGIC (UPDATED WITH DEEP-TRANSLATOR) ---
 
 def process_frame_translation(get_frame, t):
     """MoviePy uchun kadrni qayta ishlash funksiyasi"""
     frame = get_frame(t) # Numpy array (Image)
     
-    # 1. OCR (Matnni topish) - Har bir kadrda qilsa juda sekin bo'ladi.
-    # Optimallashtirish: Kadr o'lchamini kichraytirib qidirish mumkin, lekin sifat yo'qoladi.
-    # Hozircha oddiy usulda har bir kadrni tekshiramiz.
-    
+    # 1. OCR (Matnni topish)
     try:
         results = reader.readtext(frame)
     except Exception:
-        return frame # Xato bo'lsa original kadr qolsin
+        return frame # Xato bo'lsa original kadr
 
-    # Agar matn bo'lmasa, qaytarish
     if not results:
         return frame
 
-    # Numpy arrayni PIL Image ga o'tkazish (chizish osonroq)
+    # Numpy arrayni PIL Image ga o'tkazish
     img_pil = Image.fromarray(frame)
     draw = ImageDraw.Draw(img_pil)
     
-    # Fontni yuklash (Linuxda default font, yoki windowsda arial)
+    # Fontni yuklash (Linux serverlar uchun)
     try:
-        # Font o'lchamini dinamik tanlash kerak aslida
-        font = ImageFont.truetype("arial.ttf", 20)
+        # Tizim fontini topishga harakat qilamiz
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
     except:
-        font = ImageFont.load_default()
+        try:
+            # Yoki papkadagi arial.ttf
+            font = ImageFont.truetype("arial.ttf", 20)
+        except:
+            # Bo'lmasa default
+            font = ImageFont.load_default()
 
     for (bbox, text, prob) in results:
-        if prob < 0.4: continue # Ishonch past bo'lsa tashlab ketamiz
+        if prob < 0.4: continue 
 
-        # 2. Tarjima qilish
+        # 2. Tarjima qilish (DEEP_TRANSLATOR orqali)
         try:
-            translated_text = translator.translate(text, dest='uz').text
-        except:
+            # Yangi tarjima kodi:
+            translated_text = GoogleTranslator(source='auto', target='uz').translate(text)
+        except Exception as e:
+            logger.error(f"Translation error: {e}")
             translated_text = text # Tarjima o'xshamasa original qolsin
 
         # 3. Koordinatalarni olish
@@ -246,12 +247,11 @@ def process_frame_translation(get_frame, t):
         tl = (int(tl[0]), int(tl[1]))
         br = (int(br[0]), int(br[1]))
 
-        # 4. Orqa fonni o'chirish (to'rtburchak chizish)
-        # Matn rangiga mos fon tanlash qiyin, shuning uchun qora yoki oq fon qilamiz
-        draw.rectangle([tl, br], fill=(0, 0, 0)) # Qora fon
+        # 4. Orqa fonni o'chirish (Qora fon)
+        draw.rectangle([tl, br], fill=(0, 0, 0))
 
         # 5. Yangi matnni yozish
-        draw.text(tl, translated_text, font=font, fill=(255, 255, 255)) # Oq yozuv
+        draw.text(tl, translated_text, font=font, fill=(255, 255, 255)) 
 
     return np.array(img_pil)
 
@@ -259,9 +259,9 @@ def task_translate_video(video_path, output_path):
     """Video tarjima qilish asosiy taski"""
     try:
         clip = VideoFileClip(video_path)
+        # 10 soniyadan oshiq videolarni test uchun qirqish tavsiya etiladi,
+        # chunki OCR juda sekin ishlaydi.
         
-        # Diqqat: fl(make_frame) har bir kadr uchun ishlaydi. Bu juda sekin.
-        # 10 soniyalik video uchun server kuchiga qarab 5-10 daqiqa ketishi mumkin.
         new_clip = clip.fl(process_frame_translation)
         
         new_clip.write_videofile(output_path, codec='libx264', audio_codec='aac', preset='ultrafast', logger=None)
