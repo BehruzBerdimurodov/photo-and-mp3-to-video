@@ -2,9 +2,7 @@ python-telegram-bot==20.0
 moviepy==1.0.3
 pydub
 Pillow
-easyocr
 deep-translator
 opencv-python-headless
 numpy
-torch
-torchvision
+easyocr
