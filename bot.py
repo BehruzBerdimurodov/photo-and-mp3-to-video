@@ -52,7 +52,7 @@ if not hasattr(Image, "ANTIALIAS"):
 # ──────────────────────────────────────────────────────────────────────────────
 # CONFIG  — tokenni ENV orqali ham qo'yish mumkin
 # ──────────────────────────────────────────────────────────────────────────────
-TOKEN: str = os.getenv("BOT_TOKEN", "858160775:AAFAoUppwpZ-JYl_SmFd6jR-65T5mqxZh74")
+TOKEN: str = os.getenv("BOT_TOKEN", "8685876211:AAEpymwB1KC-_E5sKTytSjanSd7Q_8mEfXM")
 DEFAULT_FPS: int = 24          # fps aniqlanmasa fallback
 DEFAULT_LANG: str = "uz"
 
