@@ -3,6 +3,3 @@ moviepy==1.0.3
 pydub
 Pillow
 deep-translator
-opencv-python-headless
-numpy
-easyocr
